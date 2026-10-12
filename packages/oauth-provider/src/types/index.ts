@@ -508,7 +508,10 @@ export interface PendingClientApprovalContext<
 	/** The signed-in user who accepted consent. */
 	user: User & Record<string, unknown>;
 	session: Session & Record<string, unknown>;
-	/** The scopes the user accepted. */
+	/**
+	 * The scopes the user accepted. `clientCredentialsScopes` must be among
+	 * them.
+	 */
 	scopes: Scopes;
 	/**
 	 * The value {@link OAuthOptions.postLogin} `consentReferenceId` returned for
@@ -525,13 +528,14 @@ export interface PendingClientApproval<
 	Scopes extends readonly Scope[] = InternallySupportedScopes[],
 > {
 	/**
-	 * Owner of the approved client, stored as its `reference_id`. When omitted,
-	 * the consenting user owns the client.
+	 * Owner of the approved client, stored as its `reference_id`, such as the
+	 * organization the consenting user administers.
 	 */
-	clientReference?: string;
+	clientReference: string;
 	/**
-	 * Scope ceiling for the `client_credentials` grant. The client must be
-	 * registered for that grant with a confidential authentication method.
+	 * Scope ceiling for the `client_credentials` grant. Every scope must be one
+	 * the user accepted at this consent, and the client must be registered for
+	 * that grant with a confidential authentication method.
 	 *
 	 * @default []
 	 */
@@ -973,14 +977,14 @@ export interface OAuthOptions<
 	 * Keeps self-registered clients pending until a user consents, and lets your
 	 * application decide who owns them.
 	 *
-	 * When defined, a client created by open dynamic registration (RFC 7591) or
-	 * discovered through Client ID Metadata Documents is stored as pending
-	 * unless the registration already identifies an owner (a session user or an
-	 * initial access token `referenceId`). A pending client cannot authenticate
-	 * at any token-related endpoint, and the authorization endpoint always sends
-	 * its users to the consent page, even when they consented before. Open
-	 * registration may also request the `client_credentials` grant, which stays
-	 * unusable until the ceiling is set here.
+	 * When defined, a client created by unauthenticated dynamic registration
+	 * (RFC 7591) or discovered through Client ID Metadata Documents is stored as
+	 * pending. Such a client must register the `authorization_code` grant, since
+	 * consent is the only way to approve it. A pending client cannot
+	 * authenticate at any token-related endpoint, and the authorization endpoint
+	 * always sends its users to the consent page, even when they consented
+	 * before. Open registration may also request the `client_credentials` grant,
+	 * which stays unusable until the ceiling is set here.
 	 *
 	 * When a user accepts consent for a pending client, this callback runs
 	 * before anything is stored. Return the owner and machine-scope ceiling to
@@ -989,18 +993,19 @@ export interface OAuthOptions<
 	 * in one transaction, and only one concurrent approval can win: a client that
 	 * already has an owner is never reassigned.
 	 *
-	 * Better Auth does not decide whether the user controls the client. Prove it
-	 * here, for example by checking that the signed-in user administers the
-	 * business the client is for.
+	 * Better Auth does not decide whether the user may approve the client.
+	 * Decide it here, for example by checking that the signed-in user
+	 * administers the organization that will own it. The client's metadata is
+	 * self-asserted, so never match an owner by its name or URIs.
 	 *
 	 * @example
 	 * ```ts
-	 * approvePendingClient: async ({ client, user, consentReferenceId }) => {
-	 * 	const business = await findBusinessAdministeredBy(user.id, client);
-	 * 	if (!business) return false;
+	 * approvePendingClient: async ({ user, scopes, consentReferenceId }) => {
+	 * 	if (!consentReferenceId) return false;
+	 * 	if (!(await isOrganizationAdmin(user.id, consentReferenceId))) return false;
 	 * 	return {
-	 * 		clientReference: business.id,
-	 * 		clientCredentialsScopes: ["invoices:write"],
+	 * 		clientReference: consentReferenceId,
+	 * 		clientCredentialsScopes: scopes.filter((s) => s === "invoices:write"),
 	 * 	};
 	 * }
 	 * ```

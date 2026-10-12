@@ -88,6 +88,7 @@ export async function getClientPublicEndpoint(
 		icon: client.icon,
 		tos: client.tos,
 		policy: client.policy,
+		pending: client.pending,
 	});
 	return res;
 }

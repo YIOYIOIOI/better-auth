@@ -15,8 +15,7 @@ import type {
 import type { GrantType } from "./types/oauth";
 
 export interface ResolvedClientApproval {
-	userId: string | null;
-	referenceId: string | null;
+	referenceId: string;
 	clientCredentialsScopes: Scope[];
 }
 
@@ -25,7 +24,7 @@ export interface ResolvedClientApproval {
  * client, and validates the owner and scope ceiling it returns.
  *
  * Nothing is stored here. The result is applied by
- * {@link approvePendingClient} in the same transaction as the consent.
+ * {@link storeClientApproval} in the same transaction as the consent.
  */
 export async function resolveClientApproval(
 	ctx: GenericEndpointContext,
@@ -61,27 +60,32 @@ export async function resolveClientApproval(
 	}
 
 	const clientReference = approval.clientReference;
-	if (clientReference !== undefined && clientReference.length === 0) {
+	if (typeof clientReference !== "string" || clientReference.length === 0) {
 		throw new APIError("INTERNAL_SERVER_ERROR", {
 			error: "server_error",
-			error_description:
-				"approvePendingClient returned an empty clientReference",
+			error_description: "approvePendingClient must return a clientReference",
 		});
 	}
 	const clientCredentialsScopes = normalizeClientCredentialsScopes(
 		approval.clientCredentialsScopes ?? [],
 	);
+	// Machine access must not exceed what the user saw and accepted.
+	const unaccepted = clientCredentialsScopes.filter(
+		(scope) => !input.scopes.includes(scope),
+	);
+	if (unaccepted.length) {
+		throw new APIError("BAD_REQUEST", {
+			error: "invalid_scope",
+			error_description: `clientCredentialsScopes must be accepted at consent: ${unaccepted.join(" ")}`,
+		});
+	}
 	validateClientCredentialsScopes(
 		clientCredentialsScopes,
 		(input.client.grantTypes ?? ["authorization_code"]) as GrantType[],
 		input.client.tokenEndpointAuthMethod ?? "client_secret_basic",
 		opts,
 	);
-	return {
-		userId: clientReference ? null : input.user.id,
-		referenceId: clientReference ?? null,
-		clientCredentialsScopes,
-	};
+	return { referenceId: clientReference, clientCredentialsScopes };
 }
 
 /**
@@ -94,7 +98,7 @@ export async function resolveClientApproval(
  *
  * @throws APIError CONFLICT when the client is no longer pending or unowned.
  */
-export async function approvePendingClient(
+export async function storeClientApproval(
 	adapter: Pick<DBTransactionAdapter, "updateMany">,
 	opts: Pick<OAuthOptions<Scope[]>, "schema">,
 	clientId: string,
@@ -110,7 +114,6 @@ export async function approvePendingClient(
 		],
 		update: {
 			pending: false,
-			userId: approval.userId,
 			referenceId: approval.referenceId,
 			clientCredentialsScopes: approval.clientCredentialsScopes,
 			updatedAt: new Date(),

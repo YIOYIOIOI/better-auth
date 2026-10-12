@@ -9,13 +9,12 @@ import {
 	filterClaimsRequestUserInfoClaims,
 	getRequestedUserInfoClaims,
 } from "./claims-request";
-import { approvePendingClient, resolveClientApproval } from "./client-approval";
+import { resolveClientApproval, storeClientApproval } from "./client-approval";
 import type { AuthorizeEndpointCaller } from "./continue";
 import { oAuthState } from "./oauth";
 import { getSupportedClaims } from "./standard-claims";
-import type { OAuthConsent, OAuthOptions, Scope } from "./types";
+import type { OAuthConsent, OAuthOptions, SchemaClient, Scope } from "./types";
 import {
-	getClient,
 	isSessionFreshForSignedQuery,
 	parsePrompt,
 	removeMaxAgeFromQuery,
@@ -116,9 +115,14 @@ export async function consentEndpoint<Result>(
 		scopes: requestedScopes ?? originalRequestedScopes,
 	});
 	const consentScopes = requestedScopes ?? originalRequestedScopes;
+	// Read the stored row: approval state lives there, and resolving a
+	// discovered client could fetch its metadata on every consent.
 	const pendingClient = opts.approvePendingClient
-		? await getClient(ctx, opts, clientId)
-		: undefined;
+		? await ctx.context.adapter.findOne<SchemaClient<Scope[]>>({
+				model: opts.schema?.oauthClient?.modelName ?? "oauthClient",
+				where: [{ field: "clientId", value: clientId }],
+			})
+		: null;
 	const approval = pendingClient?.pending
 		? await resolveClientApproval(ctx, opts, {
 				client: pendingClient,
@@ -194,7 +198,7 @@ export async function consentEndpoint<Result>(
 		// The owner, the ceiling, and the consent succeed or fail together.
 		await runWithTransaction(ctx.context.adapter, async () => {
 			const adapter = await getCurrentAdapter(ctx.context.adapter);
-			await approvePendingClient(
+			await storeClientApproval(
 				adapter,
 				opts,
 				pendingClient.clientId,

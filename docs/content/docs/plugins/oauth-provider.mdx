@@ -1628,19 +1628,20 @@ Only disable PKCE for confidential clients when absolutely necessary for legacy 
 
 #### Approving Self-Registered Clients at Consent
 
-An open registration, or a client discovered through the [CIMD plugin](/docs/plugins/cimd), proves nothing about who controls the client. Define `approvePendingClient` to keep such clients pending until a signed-in user consents, and to let your application decide who owns the client when that happens.
+An open registration, or a client discovered through the [CIMD plugin](/docs/plugins/cimd), proves nothing about who controls the client. Define `approvePendingClient` to keep such clients pending until a signed-in user consents, and to decide then who owns the client and which machine access it gets.
 
 ```ts title="auth.ts"
 oauthProvider({
   allowDynamicClientRegistration: true,
   allowUnauthenticatedClientRegistration: true,
   scopes: ["openid", "invoices:write"],
-  approvePendingClient: async ({ client, user, consentReferenceId }) => { // [!code highlight]
-    const business = await findBusinessAdministeredBy(user.id, client.client_name) // [!code highlight]
-    if (!business) return false // [!code highlight]
+  approvePendingClient: async ({ user, scopes, consentReferenceId }) => { // [!code highlight]
+    // The organization the user picked on your post-login page // [!code highlight]
+    if (!consentReferenceId) return false // [!code highlight]
+    if (!(await isOrganizationAdmin(user.id, consentReferenceId))) return false // [!code highlight]
     return { // [!code highlight]
-      clientReference: business.id, // [!code highlight]
-      clientCredentialsScopes: ["invoices:write"], // [!code highlight]
+      clientReference: consentReferenceId, // [!code highlight]
+      clientCredentialsScopes: scopes.filter((scope) => scope === "invoices:write"), // [!code highlight]
     } // [!code highlight]
   }, // [!code highlight]
 })
@@ -1648,13 +1649,20 @@ oauthProvider({
 
 With the callback defined:
 
-* A client created by registration without an owner is stored as pending. Registrations made by a signed-in user, or with an initial access token that returns a `referenceId`, already have an owner and are not pending. Clients created before you define the callback are unaffected.
-* Unauthenticated registration may request the `client_credentials` grant. The client cannot use it until the callback sets a scope ceiling.
+* A client created by unauthenticated registration, or discovered through CIMD, is stored as pending. Registrations made by a signed-in user or with an initial access token are not pending. Clients created before you define the callback are unaffected.
+* A pending client must register the `authorization_code` grant, because consent is the only way to approve it. Registration without it fails with `invalid_client_metadata`.
+* Unauthenticated registration may also request the `client_credentials` grant. The client cannot use it until an approval sets a scope ceiling.
 * A pending client cannot authenticate at the token, introspection, revocation, or device authorization endpoints. The authorization endpoint always sends its users to the consent page, even when `skipConsent` is set, and answers `prompt=none` with `consent_required`.
-* When a user accepts consent for a pending client, the callback runs before anything is stored. Return `false` to refuse, or throw an `APIError` to refuse with your own message. Otherwise return `clientReference` (the owner, stored as `reference_id`; the consenting user owns the client when you omit it) and `clientCredentialsScopes` (the `client_credentials` ceiling, which follows the same rules as the [admin ceiling](#client-credentials-grant)).
-* The owner, the ceiling, and the consent are written in one transaction. The client is only updated while it is still pending and has no owner, so of two concurrent approvals only one succeeds (the other receives a `409`), and a client that already has an owner is never reassigned. Consent by other users for an approved client is ordinary consent and does not call the callback.
+* The registration response and the [public client endpoint](#get-public-client) return `pending: true`. Show it on your consent page: accepting consent for this client also hands it to an owner and can give it machine access.
 
-Better Auth does not decide whether the user controls the client; that proof is your decision in the callback, for example by checking that the signed-in user administers the business the client is for. `client` holds the self-asserted registration metadata, so treat its names and URIs as untrusted. `consentReferenceId` is the value your [`postLogin.consentReferenceId`](#consent-screen) returned, such as the organization the user chose.
+When a user accepts consent for a pending client, the callback runs before anything is stored. Return `false` to refuse, or throw an `APIError` to refuse with your own message. To approve, return:
+
+* `clientReference` (required): the owner, stored as the client's `reference_id`.
+* `clientCredentialsScopes`: the `client_credentials` ceiling. Every scope must be one the user accepted at this consent, and the client must qualify for an [admin ceiling](#client-credentials-grant). To grant machine access, have the client request those scopes in the authorization request, so the user sees them on the consent screen.
+
+The owner, the ceiling, and the consent are written in one transaction. The client is only updated while it is still pending and has no owner, so of two concurrent approvals only one succeeds (the other receives a `409`), and a client that already has an owner is never reassigned. Consent by other users for an approved client is ordinary consent and does not call the callback.
+
+Better Auth does not decide whether the user may approve the client; that is the callback's decision. Any signed-in user can reach the consent page for a pending client, so check that the user has authority over the owner you return, for example that they administer the organization. `client` holds self-asserted registration metadata, so never match an owner by the client's name or URIs. `consentReferenceId` is the value your [`postLogin.consentReferenceId`](#consent-screen) returned.
 
 If you remove the callback later, pending clients stay pending: their users receive an `unauthorized_client` error and they cannot obtain tokens.
 

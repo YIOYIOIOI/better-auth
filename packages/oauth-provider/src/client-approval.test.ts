@@ -1,8 +1,8 @@
+import type { GenericEndpointContext } from "@better-auth/core";
 import {
 	getCurrentAdapter,
 	runWithTransaction,
 } from "@better-auth/core/context";
-import { createAuthClient } from "better-auth/client";
 import { generateRandomString } from "better-auth/crypto";
 import {
 	authorizationCodeRequest,
@@ -10,13 +10,15 @@ import {
 } from "better-auth/oauth2";
 import { jwt } from "better-auth/plugins/jwt";
 import { getTestInstance } from "better-auth/test";
+import { exportJWK, generateKeyPair } from "jose";
 import { describe, expect, it, vi } from "vitest";
-import { oauthProviderClient } from "./client";
-import { approvePendingClient as storeApproval } from "./client-approval";
+import { storeClientApproval } from "./client-approval";
 import { oauthProvider } from "./oauth";
+import { registerClientMetadataDocument } from "./register";
 import { buildSignedOAuthQuery } from "./signed-query";
 import type {
 	OAuthOptions,
+	PendingClientApproval,
 	PendingClientApprovalContext,
 	SchemaClient,
 	Scope,
@@ -50,10 +52,7 @@ const adapters = (process.env.OAUTH_PROVIDER_TEST_ADAPTERS ?? "sqlite").split(
 
 async function createInstance(
 	testWith: (typeof adapters)[number],
-	options: {
-		approvePendingClient?: Approve;
-		clientReference?: Options["clientReference"];
-	},
+	options: Partial<Options>,
 ) {
 	const {
 		auth,
@@ -79,11 +78,6 @@ async function createInstance(
 		{ testWith, transaction: true },
 	);
 	const context = await auth.$context;
-	const client = createAuthClient({
-		plugins: [oauthProviderClient()],
-		baseURL: baseUrl,
-		fetchOptions: { customFetchImpl },
-	});
 
 	const register = async (body: Record<string, unknown>, headers?: Headers) => {
 		const response = await customFetchImpl(
@@ -198,7 +192,7 @@ async function createInstance(
 	return {
 		auth,
 		testUser,
-		client,
+		customFetchImpl,
 		context,
 		signInWithTestUser,
 		signInWithUser,
@@ -299,7 +293,7 @@ describe.each(adapters)("approvePendingClient on %s", (testWith) => {
 
 	it("always asks a pending client for consent, even with skipConsent", async () => {
 		const t = await createInstance(testWith, {
-			approvePendingClient: () => ({}),
+			approvePendingClient: () => false,
 		});
 		const { clientId } = await t.registerPending();
 		await t.context.adapter.update({
@@ -320,7 +314,9 @@ describe.each(adapters)("approvePendingClient on %s", (testWith) => {
 		const t = await createInstance(testWith, { approvePendingClient: approve });
 		const { clientId, clientSecret } = await t.registerPending();
 		const { headers } = await t.signInWithTestUser();
-		const { location, codeVerifier } = await t.authorize(clientId, headers);
+		const { location, codeVerifier } = await t.authorize(clientId, headers, {
+			scope: "openid invoices:write",
+		});
 
 		const result = await t.consent(location, headers);
 		expect(result.status).toBe(200);
@@ -335,7 +331,7 @@ describe.each(adapters)("approvePendingClient on %s", (testWith) => {
 		expect(context.client.client_id).toBe(clientId);
 		expect(context.client.client_secret).toBeUndefined();
 		expect(context.user.email).toEqual(expect.any(String));
-		expect(context.scopes).toEqual(["openid"]);
+		expect(context.scopes).toEqual(["openid", "invoices:write"]);
 		expect(context.headers).toBeInstanceOf(Headers);
 
 		const stored = await t.row(clientId);
@@ -366,19 +362,38 @@ describe.each(adapters)("approvePendingClient on %s", (testWith) => {
 		expect(beyondCeiling.status).toBe(400);
 	});
 
-	it("makes the consenting user the owner when no clientReference is returned", async () => {
+	it("refuses an approval that names no owner", async () => {
 		const t = await createInstance(testWith, {
-			approvePendingClient: () => ({}),
+			approvePendingClient: () => ({}) as PendingClientApproval,
 		});
 		const { clientId } = await t.registerPending();
 		const { headers } = await t.signInWithTestUser();
 		const { location } = await t.authorize(clientId, headers);
-		expect((await t.consent(location, headers)).status).toBe(200);
+		const result = await t.consent(location, headers);
+		expect(result.status).toBe(500);
 		const stored = await t.row(clientId);
-		expect(stored?.pending).toBe(false);
-		expect(stored?.userId).toEqual(expect.any(String));
+		expect(stored?.pending).toBe(true);
+		expect(stored?.userId ?? null).toBeNull();
+		expect(await t.consents(clientId)).toHaveLength(0);
+	});
+
+	it("rejects a ceiling with scopes the user did not accept", async () => {
+		const t = await createInstance(testWith, {
+			approvePendingClient: () => ({
+				clientReference: "business_1",
+				clientCredentialsScopes: ["invoices:write"],
+			}),
+		});
+		const { clientId } = await t.registerPending();
+		const { headers } = await t.signInWithTestUser();
+		const { location } = await t.authorize(clientId, headers);
+		const result = await t.consent(location, headers);
+		expect(result.status).toBe(400);
+		expect(result.body.error).toBe("invalid_scope");
+		const stored = await t.row(clientId);
+		expect(stored?.pending).toBe(true);
 		expect(stored?.referenceId ?? null).toBeNull();
-		expect(stored?.clientCredentialsScopes ?? []).toEqual([]);
+		expect(await t.consents(clientId)).toHaveLength(0);
 	});
 
 	it("leaves the client pending and stores no consent when the application refuses", async () => {
@@ -419,6 +434,7 @@ describe.each(adapters)("approvePendingClient on %s", (testWith) => {
 	it("rejects a ceiling for a client that is not registered for client_credentials", async () => {
 		const t = await createInstance(testWith, {
 			approvePendingClient: () => ({
+				clientReference: "business_1",
 				clientCredentialsScopes: ["invoices:write"],
 			}),
 		});
@@ -426,7 +442,9 @@ describe.each(adapters)("approvePendingClient on %s", (testWith) => {
 			grant_types: ["authorization_code"],
 		});
 		const { headers } = await t.signInWithTestUser();
-		const { location } = await t.authorize(registered.body.client_id, headers);
+		const { location } = await t.authorize(registered.body.client_id, headers, {
+			scope: "openid invoices:write",
+		});
 		const result = await t.consent(location, headers);
 		expect(result.status).toBe(400);
 		expect((await t.row(registered.body.client_id))?.pending).toBe(true);
@@ -526,7 +544,9 @@ describe.each(adapters)("approvePendingClient on %s", (testWith) => {
 			update: { referenceId: "business_1" },
 		});
 		const { headers } = await t.signInWithTestUser();
-		const { location } = await t.authorize(clientId, headers);
+		const { location } = await t.authorize(clientId, headers, {
+			scope: "openid invoices:write",
+		});
 		const result = await t.consent(location, headers);
 		expect(result.status).toBe(409);
 		const stored = await t.row(clientId);
@@ -538,14 +558,13 @@ describe.each(adapters)("approvePendingClient on %s", (testWith) => {
 
 	it("rolls the approval back with the surrounding transaction", async () => {
 		const t = await createInstance(testWith, {
-			approvePendingClient: () => ({}),
+			approvePendingClient: () => false,
 		});
 		const { clientId } = await t.registerPending();
 		await expect(
 			runWithTransaction(t.context.adapter, async () => {
 				const adapter = await getCurrentAdapter(t.context.adapter);
-				await storeApproval(adapter, {}, clientId, {
-					userId: null,
+				await storeClientApproval(adapter, {}, clientId, {
 					referenceId: "business_1",
 					clientCredentialsScopes: ["invoices:write"],
 				});
@@ -582,5 +601,94 @@ describe.each(adapters)("approvePendingClient on %s", (testWith) => {
 		);
 		const token = await t.clientCredentials(clientId, clientSecret);
 		expect(token.status).toBe(400);
+	});
+	it("rejects an open registration that could never reach consent", async () => {
+		const t = await createInstance(testWith, {
+			approvePendingClient: () => false,
+		});
+		const registered = await t.register({
+			grant_types: ["client_credentials"],
+			response_types: [],
+		});
+		expect(registered.status).toBe(400);
+		expect(registered.body.error).toBe("invalid_client_metadata");
+	});
+
+	it("does not mark clients registered with an initial access token as pending", async () => {
+		const t = await createInstance(testWith, {
+			allowUnauthenticatedClientRegistration: false,
+			validateInitialAccessToken: () => ({}),
+			approvePendingClient: () => false,
+		});
+		const registered = await t.register(
+			{ grant_types: ["client_credentials"], response_types: [] },
+			new Headers({ authorization: "Bearer initial-access-token" }),
+		);
+		expect(registered.status).toBe(201);
+		expect((await t.row(registered.body.client_id))?.pending).toBeFalsy();
+	});
+
+	it("tells the client and the consent page that the client is pending", async () => {
+		const t = await createInstance(testWith, {
+			approvePendingClient: () => false,
+		});
+		const registered = await t.register({});
+		expect(registered.body.pending).toBe(true);
+		const { headers } = await t.signInWithTestUser();
+		const response = await t.customFetchImpl(
+			`${baseUrl}/api/auth/oauth2/public-client?client_id=${registered.body.client_id}`,
+			{ headers },
+		);
+		expect(((await response.json()) as OAuthClient).pending).toBe(true);
+	});
+
+	it("keeps an approval and a disable that commit during a discovery refresh", async () => {
+		const t = await createInstance(testWith, {
+			approvePendingClient: () => false,
+		});
+		const opts = t.context.getPlugin("oauth-provider")!.options as Options;
+		const ctx = { context: t.context } as GenericEndpointContext;
+		const { publicKey } = await generateKeyPair("RS256", {
+			extractable: true,
+		});
+		const clientId = "https://cimd.example.com/client.json";
+		const metadata = {
+			client_id: clientId,
+			redirect_uris: [redirectUri],
+			token_endpoint_auth_method: "private_key_jwt" as const,
+			grant_types: ["authorization_code", "client_credentials"] as const,
+			response_types: ["code" as const],
+			jwks: {
+				keys: [{ ...(await exportJWK(publicKey)), kid: "k1", alg: "RS256" }],
+			},
+		};
+		const discover = (existingClient?: SchemaClient<Scope[]>) =>
+			registerClientMetadataDocument(ctx, opts, {
+				clientId,
+				clientDiscoveryId: "cimd",
+				metadata: { ...metadata, grant_types: [...metadata.grant_types] },
+				existingClient,
+			});
+		await discover();
+		const snapshot = (await t.row(clientId)) as SchemaClient<Scope[]>;
+		expect(snapshot.pending).toBe(true);
+
+		// The approval commits while the refresh is fetching metadata.
+		await storeClientApproval(t.context.adapter, opts, clientId, {
+			referenceId: "business_1",
+			clientCredentialsScopes: ["invoices:write"],
+		});
+		await t.context.adapter.update({
+			model: "oauthClient",
+			where: [{ field: "clientId", value: clientId }],
+			update: { disabled: true },
+		});
+		await discover(snapshot);
+
+		const stored = await t.row(clientId);
+		expect(stored?.pending).toBe(false);
+		expect(stored?.referenceId).toBe("business_1");
+		expect(stored?.clientCredentialsScopes).toEqual(["invoices:write"]);
+		expect(stored?.disabled).toBe(true);
 	});
 });

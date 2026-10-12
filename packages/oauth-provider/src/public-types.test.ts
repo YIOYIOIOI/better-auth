@@ -34,9 +34,9 @@ describe("public oauth-provider types", () => {
 		expectTypeOf<
 			PendingClientApprovalContext["consentReferenceId"]
 		>().toEqualTypeOf<string | undefined>();
-		expectTypeOf<PendingClientApproval["clientReference"]>().toEqualTypeOf<
-			string | undefined
-		>();
+		expectTypeOf<
+			PendingClientApproval["clientReference"]
+		>().toEqualTypeOf<string>();
 		expectTypeOf<ReturnType<ApprovePendingClient>>().toEqualTypeOf<
 			PendingClientApproval | false | Promise<PendingClientApproval | false>
 		>();

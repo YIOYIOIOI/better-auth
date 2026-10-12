@@ -81,6 +81,7 @@ const OAUTH_CLIENT_WIRE_FIELD_NAMES = [
 	"response_types",
 	"application_type",
 	"disabled",
+	"pending",
 	"skip_consent",
 	"enable_end_session",
 	"require_pkce",
