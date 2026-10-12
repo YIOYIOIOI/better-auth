@@ -323,7 +323,9 @@ export async function registerEndpoint(
 		);
 	}
 
-	if (!session && !isTokenAuthorized) {
+	// A pending client cannot use any grant until consent approves it, so open
+	// registration may request client_credentials when approval is configured.
+	if (!session && !isTokenAuthorized && !opts.approvePendingClient) {
 		if (body.grant_types?.includes("client_credentials")) {
 			throw new APIError("BAD_REQUEST", {
 				error: "invalid_client_metadata",
@@ -904,6 +906,14 @@ async function persistOAuthClientRegistration(
 		input.registrationSource === "clientMetadataDocument"
 			? input.clientDiscoveryId
 			: null;
+	// Only a newly created self-registered client without an owner waits for
+	// approval. Refreshing a discovered client never changes its approval state.
+	const startsPending =
+		Boolean(opts.approvePendingClient) &&
+		(input.registrationSource === "dynamic" ||
+			input.registrationSource === "clientMetadataDocument") &&
+		!owner?.userId &&
+		!owner?.referenceId;
 	if (
 		input.registrationSource === "clientMetadataDocument" &&
 		body.application_type === undefined
@@ -971,6 +981,7 @@ async function persistOAuthClientRegistration(
 						model: clientModel,
 						data: {
 							...schema,
+							...(startsPending ? { pending: true } : {}),
 							createdAt: new Date(iat * 1000),
 							updatedAt: new Date(iat * 1000),
 						},

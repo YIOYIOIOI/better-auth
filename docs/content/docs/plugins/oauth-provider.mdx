@@ -1626,6 +1626,38 @@ PKCE prevents authorization code interception attacks. Even for confidential cli
 
 Only disable PKCE for confidential clients when absolutely necessary for legacy compatibility.
 
+#### Approving Self-Registered Clients at Consent
+
+An open registration, or a client discovered through the [CIMD plugin](/docs/plugins/cimd), proves nothing about who controls the client. Define `approvePendingClient` to keep such clients pending until a signed-in user consents, and to let your application decide who owns the client when that happens.
+
+```ts title="auth.ts"
+oauthProvider({
+  allowDynamicClientRegistration: true,
+  allowUnauthenticatedClientRegistration: true,
+  scopes: ["openid", "invoices:write"],
+  approvePendingClient: async ({ client, user, consentReferenceId }) => { // [!code highlight]
+    const business = await findBusinessAdministeredBy(user.id, client.client_name) // [!code highlight]
+    if (!business) return false // [!code highlight]
+    return { // [!code highlight]
+      clientReference: business.id, // [!code highlight]
+      clientCredentialsScopes: ["invoices:write"], // [!code highlight]
+    } // [!code highlight]
+  }, // [!code highlight]
+})
+```
+
+With the callback defined:
+
+* A client created by registration without an owner is stored as pending. Registrations made by a signed-in user, or with an initial access token that returns a `referenceId`, already have an owner and are not pending. Clients created before you define the callback are unaffected.
+* Unauthenticated registration may request the `client_credentials` grant. The client cannot use it until the callback sets a scope ceiling.
+* A pending client cannot authenticate at the token, introspection, revocation, or device authorization endpoints. The authorization endpoint always sends its users to the consent page, even when `skipConsent` is set, and answers `prompt=none` with `consent_required`.
+* When a user accepts consent for a pending client, the callback runs before anything is stored. Return `false` to refuse, or throw an `APIError` to refuse with your own message. Otherwise return `clientReference` (the owner, stored as `reference_id`; the consenting user owns the client when you omit it) and `clientCredentialsScopes` (the `client_credentials` ceiling, which follows the same rules as the [admin ceiling](#client-credentials-grant)).
+* The owner, the ceiling, and the consent are written in one transaction. The client is only updated while it is still pending and has no owner, so of two concurrent approvals only one succeeds (the other receives a `409`), and a client that already has an owner is never reassigned. Consent by other users for an approved client is ordinary consent and does not call the callback.
+
+Better Auth does not decide whether the user controls the client; that proof is your decision in the callback, for example by checking that the signed-in user administers the business the client is for. `client` holds the self-asserted registration metadata, so treat its names and URIs as untrusted. `consentReferenceId` is the value your [`postLogin.consentReferenceId`](#consent-screen) returned, such as the organization the user chose.
+
+If you remove the callback later, pending clients stay pending: their users receive an `unauthorized_client` error and they cannot obtain tokens.
+
 ### Unauthenticated client discovery
 
 Some clients (notably MCP clients) need to connect to your authorization server without being registered in advance. The OAuth Provider plugin supports this through two mechanisms:
@@ -2040,6 +2072,13 @@ export const oauthClientTableFields = [
     name: "disabled",
     type: "boolean",
     description: "Field that indicates if the current application is disabled",
+    isOptional: true,
+  },
+  {
+    name: "pending",
+    type: "boolean",
+    description:
+      "Field that indicates the client is waiting for a user to approve it at consent through `approvePendingClient`. A pending client cannot obtain tokens.",
     isOptional: true,
   },
   {

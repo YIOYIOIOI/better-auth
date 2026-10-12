@@ -1,15 +1,21 @@
 import type { GenericEndpointContext } from "@better-auth/core";
+import {
+	getCurrentAdapter,
+	runWithTransaction,
+} from "@better-auth/core/context";
 import { APIError, getSessionFromCtx } from "better-auth/api";
 import { formatErrorURL, getIssuer } from "./authorize";
 import {
 	filterClaimsRequestUserInfoClaims,
 	getRequestedUserInfoClaims,
 } from "./claims-request";
+import { approvePendingClient, resolveClientApproval } from "./client-approval";
 import type { AuthorizeEndpointCaller } from "./continue";
 import { oAuthState } from "./oauth";
 import { getSupportedClaims } from "./standard-claims";
 import type { OAuthConsent, OAuthOptions, Scope } from "./types";
 import {
+	getClient,
 	isSessionFreshForSignedQuery,
 	parsePrompt,
 	removeMaxAgeFromQuery,
@@ -109,6 +115,19 @@ export async function consentEndpoint<Result>(
 		session: session?.session!,
 		scopes: requestedScopes ?? originalRequestedScopes,
 	});
+	const consentScopes = requestedScopes ?? originalRequestedScopes;
+	const pendingClient = opts.approvePendingClient
+		? await getClient(ctx, opts, clientId)
+		: undefined;
+	const approval = pendingClient?.pending
+		? await resolveClientApproval(ctx, opts, {
+				client: pendingClient,
+				user: session?.user!,
+				session: session?.session!,
+				scopes: consentScopes,
+				consentReferenceId: referenceId,
+			})
+		: undefined;
 	const foundConsent = await ctx.context.adapter.findOne<OAuthConsent<Scope[]>>(
 		{
 			model: "oauthConsent",
@@ -137,36 +156,55 @@ export async function consentEndpoint<Result>(
 	const consent: Omit<OAuthConsent<Scope[]>, "id"> = {
 		clientId: clientId,
 		userId: session?.user.id!,
-		scopes: requestedScopes ?? originalRequestedScopes,
+		scopes: consentScopes,
 		requestedUserInfoClaims: acceptedUserInfoClaims,
 		createdAt: new Date(iat * 1000),
 		updatedAt: new Date(iat * 1000),
 		resources: resource.length ? resource : undefined,
 		referenceId,
 	};
-	foundConsent?.id
-		? await ctx.context.adapter.update({
-				model: "oauthConsent",
-				where: [
-					{
-						field: "id",
-						value: foundConsent.id,
+	const storeConsent = async (
+		adapter: Pick<typeof ctx.context.adapter, "create" | "update">,
+	) => {
+		foundConsent?.id
+			? await adapter.update({
+					model: "oauthConsent",
+					where: [
+						{
+							field: "id",
+							value: foundConsent.id,
+						},
+					],
+					update: {
+						resources: consent.resources,
+						scopes: consent.scopes,
+						requestedUserInfoClaims: consent.requestedUserInfoClaims,
+						updatedAt: new Date(iat * 1000),
 					},
-				],
-				update: {
-					resources: consent.resources,
-					scopes: consent.scopes,
-					requestedUserInfoClaims: consent.requestedUserInfoClaims,
-					updatedAt: new Date(iat * 1000),
-				},
-			})
-		: await ctx.context.adapter.create({
-				model: "oauthConsent",
-				data: {
-					...consent,
-					scopes: consent.scopes,
-				},
-			});
+				})
+			: await adapter.create({
+					model: "oauthConsent",
+					data: {
+						...consent,
+						scopes: consent.scopes,
+					},
+				});
+	};
+	if (approval && pendingClient) {
+		// The owner, the ceiling, and the consent succeed or fail together.
+		await runWithTransaction(ctx.context.adapter, async () => {
+			const adapter = await getCurrentAdapter(ctx.context.adapter);
+			await approvePendingClient(
+				adapter,
+				opts,
+				pendingClient.clientId,
+				approval,
+			);
+			await storeConsent(adapter);
+		});
+	} else {
+		await storeConsent(ctx.context.adapter);
+	}
 
 	// Return authorization code
 	if (requestedScopes) {

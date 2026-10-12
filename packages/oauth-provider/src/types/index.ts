@@ -494,6 +494,50 @@ export interface InitialAccessTokenAuthorization {
 	referenceId?: string;
 }
 
+/**
+ * Input to {@link OAuthOptions.approvePendingClient}.
+ */
+export interface PendingClientApprovalContext<
+	Scopes extends readonly Scope[] = InternallySupportedScopes[],
+> {
+	/**
+	 * The pending client as registered. It is self-asserted metadata, so treat
+	 * names, URIs, and contacts as untrusted. Secrets are never included.
+	 */
+	client: OAuthClient;
+	/** The signed-in user who accepted consent. */
+	user: User & Record<string, unknown>;
+	session: Session & Record<string, unknown>;
+	/** The scopes the user accepted. */
+	scopes: Scopes;
+	/**
+	 * The value {@link OAuthOptions.postLogin} `consentReferenceId` returned for
+	 * this consent, such as the organization the user chose.
+	 */
+	consentReferenceId?: string;
+	headers: Headers;
+}
+
+/**
+ * Approval returned by {@link OAuthOptions.approvePendingClient}.
+ */
+export interface PendingClientApproval<
+	Scopes extends readonly Scope[] = InternallySupportedScopes[],
+> {
+	/**
+	 * Owner of the approved client, stored as its `reference_id`. When omitted,
+	 * the consenting user owns the client.
+	 */
+	clientReference?: string;
+	/**
+	 * Scope ceiling for the `client_credentials` grant. The client must be
+	 * registered for that grant with a confidential authentication method.
+	 *
+	 * @default []
+	 */
+	clientCredentialsScopes?: Scopes;
+}
+
 export interface OAuthOptions<
 	Scopes extends readonly Scope[] = InternallySupportedScopes[],
 > {
@@ -925,6 +969,45 @@ export interface OAuthOptions<
 		user?: User & Record<string, unknown>;
 		session?: Session & Record<string, unknown>;
 	}) => Awaitable<string | undefined>;
+	/**
+	 * Keeps self-registered clients pending until a user consents, and lets your
+	 * application decide who owns them.
+	 *
+	 * When defined, a client created by open dynamic registration (RFC 7591) or
+	 * discovered through Client ID Metadata Documents is stored as pending
+	 * unless the registration already identifies an owner (a session user or an
+	 * initial access token `referenceId`). A pending client cannot authenticate
+	 * at any token-related endpoint, and the authorization endpoint always sends
+	 * its users to the consent page, even when they consented before. Open
+	 * registration may also request the `client_credentials` grant, which stays
+	 * unusable until the ceiling is set here.
+	 *
+	 * When a user accepts consent for a pending client, this callback runs
+	 * before anything is stored. Return the owner and machine-scope ceiling to
+	 * approve the client, or `false` to refuse. A thrown `APIError` is passed to
+	 * the caller unchanged. The owner, the ceiling, and the consent are written
+	 * in one transaction, and only one concurrent approval can win: a client that
+	 * already has an owner is never reassigned.
+	 *
+	 * Better Auth does not decide whether the user controls the client. Prove it
+	 * here, for example by checking that the signed-in user administers the
+	 * business the client is for.
+	 *
+	 * @example
+	 * ```ts
+	 * approvePendingClient: async ({ client, user, consentReferenceId }) => {
+	 * 	const business = await findBusinessAdministeredBy(user.id, client);
+	 * 	if (!business) return false;
+	 * 	return {
+	 * 		clientReference: business.id,
+	 * 		clientCredentialsScopes: ["invoices:write"],
+	 * 	};
+	 * }
+	 * ```
+	 */
+	approvePendingClient?: (
+		context: PendingClientApprovalContext<Scopes>,
+	) => Awaitable<PendingClientApproval<Scopes> | false>;
 	/**
 	 * RBAC on OAuth Clients.
 	 *
@@ -1760,6 +1843,12 @@ export interface SchemaClient<
 	clientDiscoveryId?: string | null;
 	/** Whether the client is disabled or not. */
 	disabled?: boolean;
+	/**
+	 * Whether the client is waiting for a user to approve it at consent through
+	 * {@link OAuthOptions.approvePendingClient}. A pending client cannot
+	 * authenticate at any token-related endpoint.
+	 */
+	pending?: boolean | null;
 	/**
 	 * Restricts scopes allowed for the client.
 	 *
