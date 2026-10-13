@@ -1,5 +1,15 @@
 # @better-auth/sso
 
+## 1.7.8
+
+### Patch Changes
+
+- [#11512](https://github.com/better-auth/better-auth/pull/11512) [`4175b34`](https://github.com/better-auth/better-auth/commit/4175b34a8f70d5abb542ac7fc205dc42f564c03a) Thanks [@bytaesu](https://github.com/bytaesu)! - Align the installed `@better-auth/utils` version with `better-call` while accepting `^0.4.2 || ^0.5.0` across official package peers.
+
+- [#11378](https://github.com/better-auth/better-auth/pull/11378) [`6c89bb1`](https://github.com/better-auth/better-auth/commit/6c89bb18f191a9f6cf7ce893b4af1c329cd4104d) Thanks [@bytaesu](https://github.com/bytaesu)! - Updating an SSO provider with a partial `mapping` no longer fails validation. Since v1.7.0, `updateSSOProvider` rejected any OIDC or SAML mapping that left out `email` or `name`, even though both have documented defaults and v1.6 accepted them. `registerSSOProvider` now accepts these mappings too. Omitted fields fall back to the defaults. A mapping that passes `id` is still rejected, as described in the v1.7 upgrade guide.
+
+- [#11438](https://github.com/better-auth/better-auth/pull/11438) [`61f64f4`](https://github.com/better-auth/better-auth/commit/61f64f46adacc1c7c1053aa62e4f6b83619ccb61) Thanks [@Tushar-Khandelwal-2004](https://github.com/Tushar-Khandelwal-2004)! - Reject OIDC SSO provider registration when the configured issuer differs from the discovery document, including trailing slash mismatches, instead of failing later during sign-in. Existing providers with a mismatched issuer are unchanged and must be reconfigured to match the discovery document.
+
 ## 1.7.7
 
 ## 1.7.6
